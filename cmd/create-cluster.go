@@ -2,94 +2,46 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
-	"os"
-	"os/exec"
 
+	"github.com/LucasRufo/go-kindxt/charts"
+	"github.com/LucasRufo/go-kindxt/config"
+	"github.com/LucasRufo/go-kindxt/util"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
+	"github.com/spf13/pflag"
 )
-
-type KindConfig struct {
-	Kind       string  `yaml:"kind"`
-	ApiVersion string  `yaml:"apiVersion"`
-	Nodes      []Nodes `yaml:"nodes"`
-}
-
-type Nodes struct {
-	Role                 string             `yaml:"role"`
-	Image                string             `yaml:"image"`
-	KubeadmConfigPatches []string           `yaml:"kubeadmConfigPatches"`
-	ExtraPortMappings    []ExtraPortMapping `yaml:"extraPortMappings"`
-}
-
-type ExtraPortMapping struct {
-	ContainerPort int    `yaml:"containerPort"`
-	HostPort      int    `yaml:"hostPort"`
-	Protocol      string `yaml:"protocol"`
-}
 
 func init() {
 	rootCmd.AddCommand(createClusterCommand)
-}
 
-func deleteKindCluster() {
-	kindDeleteClusterCmd := exec.Command("kind", "delete", "cluster")
-
-	kindDeleteClusterCmd.Stdout = os.Stdout
-	kindDeleteClusterCmd.Stderr = os.Stderr
-
-	starterr := kindDeleteClusterCmd.Start()
-	err := kindDeleteClusterCmd.Wait()
-
-	if err != nil || starterr != nil {
-		fmt.Println("Cluster deleted.")
+	for _, helmPackage := range charts.HelmPackages {
+		createClusterCommand.PersistentFlags().Bool(helmPackage.ParameterName, false, helmPackage.Description)
 	}
 }
 
-func createKindCluster() {
-	kubeadmConfigPatches := []string{
-		`kind: InitConfiguration
-nodeRegistration:
-  kubeletExtraArgs:
-    node-labels: "ingress-ready=true"`,
-	}
-
-	kindConfig := KindConfig{
-		Kind:       "Cluster",
-		ApiVersion: "kind.x-k8s.io/v1alpha4",
-		Nodes: []Nodes{
-			{
-				Role:                 "control-plane",
-				Image:                "kindest/node:v1.28.0",
-				KubeadmConfigPatches: kubeadmConfigPatches,
-				ExtraPortMappings:    []ExtraPortMapping{},
-			},
-		},
-	}
-
-	yamlData, err := yaml.Marshal(&kindConfig)
+func deleteKindCluster() error {
+	err := util.ExecuteOsCommand("kind", "delete", "cluster")
 
 	if err != nil {
-		fmt.Printf("Error while marshaling kind YAML config. %v", err)
+		return err
 	}
 
-	fileName := "kindConfig.yaml"
-	err = ioutil.WriteFile(fileName, yamlData, 0644)
+	fmt.Println("Cluster deleted.")
 
-	if err != nil {
-		panic("Unable to create kind YAML config file.")
-	}
+	return nil
+}
+
+func createKindCluster(extraPortBindings []config.ExtraPortMapping) error {
+	fileName := config.CreateKindYAMLConfig(extraPortBindings)
 
 	configFlag := fmt.Sprintf("--config=%s", fileName)
 
-	kindCreateClusterCmd := exec.Command("kind", "create", "cluster", configFlag)
+	err := util.ExecuteOsCommand("kind", "create", "cluster", configFlag, "--wait=1m")
 
-	kindCreateClusterCmd.Stdout = os.Stdout
-	kindCreateClusterCmd.Stderr = os.Stderr
+	if err != nil {
+		return err
+	}
 
-	kindCreateClusterCmd.Start()
-	kindCreateClusterCmd.Wait()
+	return nil
 }
 
 var createClusterCommand = &cobra.Command{
@@ -99,6 +51,26 @@ var createClusterCommand = &cobra.Command{
 		//there is no problem in trying to delete the cluster every time that we create a new one.
 		deleteKindCluster()
 
-		createKindCluster()
+		var helmPackagesToInstall []charts.HelmPackage
+
+		cmd.Flags().Visit(func(f *pflag.Flag) {
+			for _, helmPackage := range charts.HelmPackages {
+				helmPackagesToInstall = append(helmPackagesToInstall, helmPackage)
+			}
+		})
+
+		var extraPortBindings []config.ExtraPortMapping
+
+		for _, helmPackage := range helmPackagesToInstall {
+			extraPortBindings = append(extraPortBindings, helmPackage.Ports)
+		}
+
+		createKindCluster(extraPortBindings)
+
+		for _, helmPackage := range helmPackagesToInstall {
+			err := helmPackage.Install()
+
+			fmt.Println(err)
+		}
 	},
 }
